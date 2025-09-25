@@ -35,6 +35,7 @@ contract CryptoCourt {
     event DisputeCreated(uint256 indexed disputeId, address indexed plaintiff, address indexed defendant, uint256 amount);
     event ArbitratorAssigned(uint256 indexed disputeId, address indexed arbitrator);
     event DisputeResolved(uint256 indexed disputeId, address indexed winner, uint256 amount);
+    event DisputeCancelled(uint256 indexed disputeId, address indexed cancelledBy, uint256 refundAmount);
     event ArbitratorAuthorized(address indexed arbitrator);
     
     modifier onlyOwner() {
@@ -129,6 +130,48 @@ contract CryptoCourt {
         payable(dispute.arbitrator).transfer(arbitrationFee);
         
         emit DisputeResolved(_disputeId, _winner, dispute.amount);
+    }
+    
+    // NEW FUNCTION: Cancel Dispute
+    function cancelDispute(uint256 _disputeId) 
+        external 
+        disputeExists(_disputeId) 
+    {
+        Dispute storage dispute = disputes[_disputeId];
+        
+        // Only plaintiff can cancel if no arbitrator assigned yet
+        // Both parties can cancel if arbitrator is assigned but dispute hasn't started
+        require(
+            (dispute.status == DisputeStatus.Created && msg.sender == dispute.plaintiff) ||
+            (dispute.status == DisputeStatus.ArbitratorAssigned && 
+             (msg.sender == dispute.plaintiff || msg.sender == dispute.defendant)),
+            "Not authorized to cancel or dispute cannot be cancelled"
+        );
+        
+        dispute.status = DisputeStatus.Cancelled;
+        dispute.resolvedAt = block.timestamp;
+        
+        uint256 refundAmount;
+        address refundRecipient;
+        
+        if (dispute.status == DisputeStatus.Created) {
+            // If no arbitrator assigned, refund everything to plaintiff
+            refundAmount = dispute.amount + arbitrationFee;
+            refundRecipient = dispute.plaintiff;
+        } else {
+            // If arbitrator assigned, refund dispute amount to plaintiff
+            // and pay arbitration fee to arbitrator for their time
+            refundAmount = dispute.amount;
+            refundRecipient = dispute.plaintiff;
+            
+            // Pay arbitrator for their time
+            payable(dispute.arbitrator).transfer(arbitrationFee);
+        }
+        
+        // Refund the dispute amount
+        payable(refundRecipient).transfer(refundAmount);
+        
+        emit DisputeCancelled(_disputeId, msg.sender, refundAmount);
     }
     
     // Additional utility functions
