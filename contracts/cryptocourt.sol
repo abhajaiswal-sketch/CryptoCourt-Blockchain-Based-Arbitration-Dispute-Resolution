@@ -16,13 +16,7 @@ contract CryptoCourt {
         address winner;
     }
     
-    enum DisputeStatus {
-        Created,
-        ArbitratorAssigned,
-        InProgress,
-        Resolved,
-        Cancelled
-    }
+   
     
     // State variables
     mapping(uint256 => Dispute) public disputes;
