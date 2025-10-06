@@ -34,6 +34,7 @@ contract CryptoCourt {
     // Events
     event DisputeCreated(uint256 indexed disputeId, address indexed plaintiff, address indexed defendant, uint256 amount);
     event ArbitratorAssigned(uint256 indexed disputeId, address indexed arbitrator);
+    event DisputeInProgress(uint256 indexed disputeId, uint256 timestamp);
     event DisputeResolved(uint256 indexed disputeId, address indexed winner, uint256 amount);
     event DisputeCancelled(uint256 indexed disputeId, address indexed cancelledBy, uint256 refundAmount);
     event ArbitratorAuthorized(address indexed arbitrator);
@@ -107,6 +108,21 @@ contract CryptoCourt {
         emit ArbitratorAssigned(_disputeId, _arbitrator);
     }
     
+    // NEW FUNCTION: Start Dispute Investigation
+    function startDisputeInvestigation(uint256 _disputeId) 
+        external 
+        onlyAuthorizedArbitrator
+        disputeExists(_disputeId) 
+    {
+        Dispute storage dispute = disputes[_disputeId];
+        require(dispute.arbitrator == msg.sender, "Only assigned arbitrator can start investigation");
+        require(dispute.status == DisputeStatus.ArbitratorAssigned, "Dispute must be in ArbitratorAssigned status");
+        
+        dispute.status = DisputeStatus.InProgress;
+        
+        emit DisputeInProgress(_disputeId, block.timestamp);
+    }
+    
     // Core Function 3: Resolve Dispute
     function resolveDispute(uint256 _disputeId, address _winner) 
         external 
@@ -132,7 +148,7 @@ contract CryptoCourt {
         emit DisputeResolved(_disputeId, _winner, dispute.amount);
     }
     
-    // NEW FUNCTION: Cancel Dispute
+    // Function: Cancel Dispute
     function cancelDispute(uint256 _disputeId) 
         external 
         disputeExists(_disputeId) 
