@@ -23,6 +23,7 @@ contract CryptoCourt {
         Resolved,
         Cancelled
     }
+    
     // State variables
     mapping(uint256 => Dispute) public disputes;
     mapping(address => bool) public authorizedArbitrators;
@@ -37,7 +38,11 @@ contract CryptoCourt {
     event DisputeResolved(uint256 indexed disputeId, address indexed winner, uint256 amount);
     event DisputeCancelled(uint256 indexed disputeId, address indexed cancelledBy, uint256 refundAmount);
     event ArbitratorAuthorized(address indexed arbitrator);
+    event ArbitratorRevoked(address indexed arbitrator);
+    event ArbitrationFeeUpdated(uint256 oldFee, uint256 newFee);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     
+    // Modifiers
     modifier onlyOwner() {
         require(msg.sender == owner, "Only owner can call this function");
         _;
@@ -67,6 +72,7 @@ contract CryptoCourt {
         require(_defendant != msg.sender, "Cannot create dispute with yourself");
         require(msg.value > arbitrationFee, "Must send more than arbitration fee");
         require(bytes(_description).length > 0, "Description cannot be empty");
+        require(bytes(_description).length <= 1000, "Description too long");
         
         uint256 disputeId = disputeCounter;
         uint256 disputeAmount = msg.value - arbitrationFee;
@@ -107,7 +113,7 @@ contract CryptoCourt {
         emit ArbitratorAssigned(_disputeId, _arbitrator);
     }
     
-    // NEW FUNCTION: Start Dispute Investigation
+    // Start Dispute Investigation
     function startDisputeInvestigation(uint256 _disputeId) 
         external 
         onlyAuthorizedArbitrator
@@ -122,7 +128,7 @@ contract CryptoCourt {
         emit DisputeInProgress(_disputeId, block.timestamp);
     }
     
-    // Core Function 3: Resolve Dispute
+    // Core Function 3: Resolve Dispute (FIXED - Reentrancy Protection)
     function resolveDispute(uint256 _disputeId, address _winner) 
         external 
         onlyAuthorizedArbitrator 
@@ -134,68 +140,89 @@ contract CryptoCourt {
                 "Invalid dispute status");
         require(_winner == dispute.plaintiff || _winner == dispute.defendant, "Winner must be involved party");
         
+        // Update state BEFORE transfers (Checks-Effects-Interactions pattern)
         dispute.status = DisputeStatus.Resolved;
         dispute.resolvedAt = block.timestamp;
         dispute.winner = _winner;
         
-        // Transfer dispute amount to winner
-        payable(_winner).transfer(dispute.amount);
+        uint256 amountToWinner = dispute.amount;
+        uint256 feeToArbitrator = arbitrationFee;
         
-        // Transfer arbitration fee to arbitrator
-        payable(dispute.arbitrator).transfer(arbitrationFee);
+        emit DisputeResolved(_disputeId, _winner, amountToWinner);
         
-        emit DisputeResolved(_disputeId, _winner, dispute.amount);
+        // Transfer funds AFTER state changes
+        (bool successWinner, ) = payable(_winner).call{value: amountToWinner}("");
+        require(successWinner, "Transfer to winner failed");
+        
+        (bool successArbitrator, ) = payable(dispute.arbitrator).call{value: feeToArbitrator}("");
+        require(successArbitrator, "Transfer to arbitrator failed");
     }
     
-    // Function: Cancel Dispute
+    // Cancel Dispute (FIXED - Reentrancy Protection)
     function cancelDispute(uint256 _disputeId) 
         external 
         disputeExists(_disputeId) 
     {
         Dispute storage dispute = disputes[_disputeId];
+        DisputeStatus currentStatus = dispute.status;
         
-        // Only plaintiff can cancel if no arbitrator assigned yet
-        // Both parties can cancel if arbitrator is assigned but dispute hasn't started
+        // Check authorization based on current status
         require(
-            (dispute.status == DisputeStatus.Created && msg.sender == dispute.plaintiff) ||
-            (dispute.status == DisputeStatus.ArbitratorAssigned && 
+            (currentStatus == DisputeStatus.Created && msg.sender == dispute.plaintiff) ||
+            (currentStatus == DisputeStatus.ArbitratorAssigned && 
              (msg.sender == dispute.plaintiff || msg.sender == dispute.defendant)),
             "Not authorized to cancel or dispute cannot be cancelled"
         );
         
-        dispute.status = DisputeStatus.Cancelled;
-        dispute.resolvedAt = block.timestamp;
-        
+        // Calculate refunds before state changes
         uint256 refundAmount;
         address refundRecipient;
+        uint256 arbitratorFee = 0;
+        address arbitratorAddress = address(0);
         
-        if (dispute.status == DisputeStatus.Created) {
-            // If no arbitrator assigned, refund everything to plaintiff
+        if (currentStatus == DisputeStatus.Created) {
             refundAmount = dispute.amount + arbitrationFee;
             refundRecipient = dispute.plaintiff;
         } else {
-            // If arbitrator assigned, refund dispute amount to plaintiff
-            // and pay arbitration fee to arbitrator for their time
             refundAmount = dispute.amount;
             refundRecipient = dispute.plaintiff;
-            
-            // Pay arbitrator for their time
-            payable(dispute.arbitrator).transfer(arbitrationFee);
+            arbitratorFee = arbitrationFee;
+            arbitratorAddress = dispute.arbitrator;
         }
         
-        // Refund the dispute amount
-        payable(refundRecipient).transfer(refundAmount);
+        // Update state BEFORE transfers
+        dispute.status = DisputeStatus.Cancelled;
+        dispute.resolvedAt = block.timestamp;
         
         emit DisputeCancelled(_disputeId, msg.sender, refundAmount);
+        
+        // Perform transfers AFTER state changes
+        (bool successRefund, ) = payable(refundRecipient).call{value: refundAmount}("");
+        require(successRefund, "Refund transfer failed");
+        
+        if (arbitratorFee > 0 && arbitratorAddress != address(0)) {
+            (bool successArbitrator, ) = payable(arbitratorAddress).call{value: arbitratorFee}("");
+            require(successArbitrator, "Arbitrator fee transfer failed");
+        }
     }
     
-    // Additional utility functions
+    // Authorize Arbitrator
     function authorizeArbitrator(address _arbitrator) external onlyOwner {
         require(_arbitrator != address(0), "Invalid arbitrator address");
+        require(!authorizedArbitrators[_arbitrator], "Arbitrator already authorized");
         authorizedArbitrators[_arbitrator] = true;
         emit ArbitratorAuthorized(_arbitrator);
     }
     
+    // Revoke Arbitrator (NEW)
+    function revokeArbitrator(address _arbitrator) external onlyOwner {
+        require(_arbitrator != address(0), "Invalid arbitrator address");
+        require(authorizedArbitrators[_arbitrator], "Arbitrator not authorized");
+        authorizedArbitrators[_arbitrator] = false;
+        emit ArbitratorRevoked(_arbitrator);
+    }
+    
+    // View Functions
     function getDispute(uint256 _disputeId) 
         external 
         view 
@@ -213,13 +240,30 @@ contract CryptoCourt {
         return authorizedArbitrators[_arbitrator];
     }
     
-    // Emergency function to update arbitration fee
+    // Update Arbitration Fee
     function updateArbitrationFee(uint256 _newFee) external onlyOwner {
+        require(_newFee > 0, "Fee must be greater than zero");
+        require(_newFee != arbitrationFee, "New fee must be different");
+        uint256 oldFee = arbitrationFee;
         arbitrationFee = _newFee;
+        emit ArbitrationFeeUpdated(oldFee, _newFee);
     }
     
-    // Function to withdraw contract balance (only owner)
-    function withdraw() external onlyOwner {
-        payable(owner).transfer(address(this).balance);
+    // Transfer Ownership (NEW)
+    function transferOwnership(address _newOwner) external onlyOwner {
+        require(_newOwner != address(0), "Invalid new owner address");
+        require(_newOwner != owner, "Already the owner");
+        address previousOwner = owner;
+        owner = _newOwner;
+        emit OwnershipTransferred(previousOwner, _newOwner);
+    }
+    
+    // REMOVED: withdraw() function - This was dangerous as it could drain funds 
+    // that belong to active disputes. Funds should only be transferred through 
+    // the proper dispute resolution mechanisms.
+    
+    // Emergency function to check contract balance
+    function getContractBalance() external view returns (uint256) {
+        return address(this).balance;
     }
 }
